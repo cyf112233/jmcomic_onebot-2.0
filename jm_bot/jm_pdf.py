@@ -261,11 +261,11 @@ def _demo_main() -> None:
     用法示例（请根据实际路径修改）：
       python -m jm_bot.jm_pdf
 
-    默认会尝试读取示例教程配置：jm库教程/jm漫画转pdf/config.yml
+    尝试读取默认配置：jm_bot/jm_pdf/config.yml
     - 若环境已安装 jmcomic，可在此处调用下载
     - 随后将 base_dir 下所有子目录转换为 PDF
     """
-    default_yaml = "jm库教程/jm漫画转pdf/config.yml"
+    default_yaml = "jm_bot/jm_pdf/config.yml"
     try:
         cfg = load_jmcomic_yaml_config(default_yaml)
     except Exception as e:
