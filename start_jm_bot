@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# ============================================
+# JM Bot launcher (Linux/macOS)
+# - Check and install missing dependencies
+# - Launch the bot main module
+# Usage: run in terminal with ./launch.sh
+# ============================================
+
+# Change to the script directory
+cd "$(dirname "$0")"
+
+# Choose Python launcher
+if command -v python3 &>/dev/null; then
+    PY="python3"
+else
+    PY="python"
+fi
+
+echo "[INFO] Using interpreter: $PY"
+$PY --version
+
+echo
+echo "[STEP] Checking and installing dependencies..."
+$PY scripts/check_and_install.py
+RC=$?
+if [ "$RC" -ne 0 ]; then
+    echo "[WARN] Dependency check returned: $RC. Trying to launch anyway..."
+fi
+
+echo
+echo "[STEP] Launching JM Bot main..."
+$PY -m jm_bot.main
+APP_RC=$?
+echo
+echo "[EXIT] JM Bot exited with code=$APP_RC"
+
+echo
+read -p "Press enter to continue..."
+exit $APP_RC
