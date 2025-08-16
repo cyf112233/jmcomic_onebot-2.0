@@ -20,6 +20,18 @@ JMComic OneBot 2.0 是一个基于 OneBot 协议的 QQ 机器人，专为漫画�
 
 ## 🚀 快速开始
 
+https://github.com/hect0x7/JMComic-Crawler-Python
+
+PDF文件输出取自
+
+https://github.com/salikx/image2pdf
+
+onebot v11 协议
+
+https://github.com/botuniverse/onebot-11
+
+你可以用napcat等支持websocket的onebot服务端工具来连接使用
+
 1. 发送 `/帮助` 查看详细使用说明
 2. 在禁漫天堂找到你想看的漫画ID
 3. 发送 `/jm 漫画ID` 即可获取漫画
