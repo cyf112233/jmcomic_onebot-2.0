@@ -1,0 +1,42 @@
+# OneBot 正向 WebSocket 客户端配置（统一连接地址）
+# 参考 onebot协议wiki/communication/ws.md 与 authorization.md
+# - OneBot 侧需要启用 ws.enable 并监听指定端口
+# - 推荐使用统一的 “/” 路径：同一条连接同时提供 /api 与 /event
+# - 如果 OneBot 配置了 auth.access_token，这里也需要填写相同的 token
+
+onebot:
+  # OneBot WebSocket 服务统一地址。默认 127.0.0.1:6700
+  # 常见可选： ws://127.0.0.1:6700/   或 ws://127.0.0.1:6700/api 以及 /event
+  # 建议优先使用根路径 / 作为统一地址
+  ws_url: "ws://127.0.0.1:6700/"
+
+  # 访问令牌。若 OneBot 端配置了 auth.access_token，则必须一致
+  # 连接时将通过请求头 Authorization: Bearer <token> 传递
+  access_token: ""
+
+  # 连接超时（秒）
+  connect_timeout: 10
+
+  # 断线自动重连间隔（秒）
+  reconnect_interval: 3
+
+  # 是否通过 Query 传递 token（仅在无法设置请求头时开启）
+  # 开启后将附加 ?access_token=<token> 到 WS URL
+  use_query_token: false
+
+# 机器人自身的一些可选配置（按需扩展）
+bot:
+  # 可选：用于过滤事件或做本机标识；不影响协议
+  name: "jm-bot"
+  # 可选：启动时是否打印原始事件 JSON
+  verbose_event_log: true
+
+  # 是否启用“分群冷却”
+  # 开启后，每个群在执行一次 /jm 命令后会进入独立的冷却计时，冷却结束前拒绝再次执行
+  per_group_cooldown_enabled: true
+  # 分群冷却时间（秒）。仅在 per_group_cooldown_enabled 为 true 时生效
+  per_group_cooldown_seconds: 60
+
+  # 机器人管理员QQ号列表（仅这些QQ可使用 /开启jm 与 /关闭jm）
+  # 示例：admins: [12345678, 23456789]
+  admins: []
