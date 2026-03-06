@@ -37,6 +37,18 @@ set APP_RC=%ERRORLEVEL%
 echo.
 echo [EXIT] JM Bot exited with code=%APP_RC%
 
+REM Check if exit code is 3 (restart signal)
+if "%APP_RC%"=="3" (
+  echo [INFO] Restart requested, restarting bot...
+  timeout /t 2 /nobreak >nul
+  goto :restart_bot
+)
+
 echo.
 pause
 endlocal & exit /b %APP_RC%
+
+:restart_bot
+endlocal
+"%~f0"
+exit /b

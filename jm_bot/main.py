@@ -43,10 +43,12 @@ from . import message as MSG
 
 # -------- 命令解析 --------
 # 支持可选的命令前缀（如 /jm、!jm、.jm、#jm），以及两端空白
-CMD_JM = re.compile(r"[/.!#]?\s*jm\s+(\d+)\b", re.IGNORECASE)
-CMD_ENABLE = re.compile(r"[/.!#]?\s*开启jm\b", re.IGNORECASE)
-CMD_DISABLE = re.compile(r"[/.!#]?\s*关闭jm\b", re.IGNORECASE)
-CMD_HELP = re.compile(r"[/.!#]?\s*帮助\b", re.IGNORECASE)
+# 使用 ^ 确保命令必须在消息开头（忽略前导空白）
+CMD_JM = re.compile(r"^\s*[/.!#]?\s*jm\s+(\d+)\b", re.IGNORECASE)
+CMD_ENABLE = re.compile(r"^\s*[/.!#]?\s*开启jm\s*$", re.IGNORECASE)
+CMD_DISABLE = re.compile(r"^\s*[/.!#]?\s*关闭jm\s*$", re.IGNORECASE)
+CMD_HELP = re.compile(r"^\s*[/.!#]?\s*帮助\s*$", re.IGNORECASE)
+CMD_UPDATE = re.compile(r"^\s*[/.!#]?\s*更新jm\s*$", re.IGNORECASE)
 
 # 预览页数量（发送给自己）
 PREVIEW_IMAGE_COUNT = 3
@@ -148,25 +150,34 @@ def _prepare_temp_yaml(jm_yaml_src_path: str, work_dir: str) -> str:
 
 
 def _find_album_dir_in_work(work_dir: str, album_id: str) -> Optional[str]:
+    """
+    在 work_dir 下查找漫画目录（优化版本，避免不必要的遍历）
+    """
     base = pathlib.Path(work_dir)
+    if not base.exists():
+        return None
+    
+    # 1. 优先：精确匹配 album_id
     exact = base / album_id
     if exact.exists() and exact.is_dir():
         return str(exact)
-    candidates = [p for p in base.iterdir() if p.is_dir()]
-    for p in candidates:
-        if album_id in p.name:
-            return str(p)
-    def count_images(root: pathlib.Path) -> int:
-        chapters = _list_numeric_subdirs(root)
-        if not chapters:
-            chapters = [root]
-        n = 0
-        for ch in chapters:
-            n += len(_list_images_in_dir(ch))
-        return n
-    if candidates:
-        best = max(candidates, key=count_images)
-        return str(best)
+    
+    # 2. 次选：目录名包含 album_id（第一个匹配即返回）
+    try:
+        for p in base.iterdir():
+            if p.is_dir() and album_id in p.name:
+                return str(p)
+    except Exception:
+        pass
+    
+    # 3. 最后：返回第一个目录（通常 work_dir 只有一个下载的目录）
+    try:
+        for p in base.iterdir():
+            if p.is_dir():
+                return str(p)
+    except Exception:
+        pass
+    
     return None
 
 
@@ -424,6 +435,56 @@ async def _notify_admins(client: OneBotWSClient, cfg: AppConfig, text: str) -> N
         except Exception as e:
             log_warn(f"通知管理员失败 uid={uid}: {e!r}")
 
+async def handle_update_command(client: OneBotWSClient, cfg: AppConfig, group_id: int) -> None:
+    """
+    处理更新命令：更新 jmcomic 库并重启项目
+    """
+    import sys
+    import subprocess
+    
+    await _call_and_get_message_id(
+        client.send_group_message(group_id, [MSG.text("开始更新 jmcomic 库，请稍候...")])
+    )
+    
+    try:
+        # 执行 pip install --upgrade jmcomic
+        log_info("开始更新 jmcomic 库...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "jmcomic"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        
+        if result.returncode == 0:
+            log_info(f"jmcomic 更新成功：{result.stdout}")
+            await _call_and_get_message_id(
+                client.send_group_message(group_id, [MSG.text("jmcomic 库更新成功！正在重启项目...")])
+            )
+            
+            # 等待消息发送完成
+            await asyncio.sleep(1)
+            
+            # 通过退出码 3 触发重启（由启动脚本处理）
+            log_info("准备重启项目（退出码 3）...")
+            sys.exit(3)
+        else:
+            error_msg = f"更新失败：{result.stderr}"
+            log_err(error_msg)
+            await _call_and_get_message_id(
+                client.send_group_message(group_id, [MSG.text(f"更新失败：\n{result.stderr[:500]}")])
+            )
+    except subprocess.TimeoutExpired:
+        await _call_and_get_message_id(
+            client.send_group_message(group_id, [MSG.text("更新超时，请稍后重试")])
+        )
+    except Exception as e:
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        log_err(f"更新异常：{tb}")
+        await _call_and_get_message_id(
+            client.send_group_message(group_id, [MSG.text(f"更新异常：{str(e)[:200]}")])
+        )
+
 # -----------------------------
 # 启动与事件注册
 # -----------------------------
@@ -476,12 +537,19 @@ def _install_event_handler(client: OneBotWSClient, cfg: AppConfig) -> None:
         if not group_id:
             return
 
-        text = _get_plain_text_from_event_message(evt)
         user_id = evt.get("user_id")
+        
+        # 延迟获取文本，只在需要时才处理
+        text: Optional[str] = None
+        
+        def get_text() -> str:
+            nonlocal text
+            if text is None:
+                text = _get_plain_text_from_event_message(evt)
+            return text
 
-        # 管理开关命令（严格匹配：仅当整条消息完全等于“/开启jm”才触发）
-        norm = (text or "").strip()
-        if norm == "/开启jm":
+        # 管理开关命令（使用正则严格匹配）
+        if CMD_ENABLE.match(get_text()):
             if _is_admin(cfg, user_id):
                 await set_group_enabled(int(group_id), True)
                 await _call_and_get_message_id(
@@ -492,11 +560,8 @@ def _install_event_handler(client: OneBotWSClient, cfg: AppConfig) -> None:
                     client.send_group_message(int(group_id), [MSG.text("无权限：仅机器人管理员可用 /开启jm。")])
                 )
             return
-        # 若疑似管理员命令但不完全匹配，则不执行任何命令
-        if norm.startswith("/开启jm"):
-            return
 
-        if norm == "/关闭jm":
+        if CMD_DISABLE.match(get_text()):
             if _is_admin(cfg, user_id):
                 await set_group_enabled(int(group_id), False)
                 await _call_and_get_message_id(
@@ -507,11 +572,17 @@ def _install_event_handler(client: OneBotWSClient, cfg: AppConfig) -> None:
                     client.send_group_message(int(group_id), [MSG.text("无权限：仅机器人管理员可用 /关闭jm。")])
                 )
             return
-        # 若疑似管理员命令但不完全匹配，则不执行任何命令
-        if norm.startswith("/关闭jm"):
+
+        if CMD_UPDATE.match(get_text()):
+            if _is_admin(cfg, user_id):
+                await handle_update_command(client, cfg, int(group_id))
+            else:
+                await _call_and_get_message_id(
+                    client.send_group_message(int(group_id), [MSG.text("无权限：仅机器人管理员可用 /更新jm。")])
+                )
             return
 
-        if CMD_HELP.search(text or ""):
+        if CMD_HELP.match(get_text()):
             # 未开启则提示
             if not is_group_enabled(int(group_id)):
                 await _call_and_get_message_id(
@@ -523,16 +594,16 @@ def _install_event_handler(client: OneBotWSClient, cfg: AppConfig) -> None:
                 "1) /jm <本子ID> - 拉取漫画并发送（普通用户可用）\n"
                 "2) /帮助 - 显示本帮助（普通用户可用）\n"
                 "3) /开启jm - 启用本群（机器人管理员可用）\n"
-                "4) /关闭jm - 禁用本群（机器人管理员可用）"
+                "4) /关闭jm - 禁用本群（机器人管理员可用）\n"
+                "5) /更新jm - 更新jmcomic库并重启（机器人管理员可用）"
             )
             await _call_and_get_message_id(
                 client.send_group_message(int(group_id), [MSG.text(help_text)])
             )
             return
 
-        # 解析 /jm 命令
-        # Use search() to allow leading mentions or other segments before the command
-        m = CMD_JM.search(text or "")
+        # 解析 /jm 命令（使用 match 确保命令在开头）
+        m = CMD_JM.match(get_text())
         if not m:
             return
 
