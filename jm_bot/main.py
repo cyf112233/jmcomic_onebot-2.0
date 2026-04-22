@@ -1,24 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-主逻辑：
-- 监听群消息，匹配命令：jm <album_id>
-- 使用 jm_bot/jm_pdf/config.yml 配置，通过 jmcomic 下载目标漫画到本地
-- 对该漫画目录执行 PDF 合成
-- 对 PDF 进行 ZIP 加密压缩（随机 6 位数字密码）
-- 按步骤与顺序：
-  1) 把漫画（若干预览页）发给自己（私聊图片）
-  2) 再给自己发一条漫画信息（文本）
-  3) 把上述消息合并转发给自己（forward #1）
-  4) 再给自己发一次漫画信息（文本）
-  5) 再次合并（包含 forward #1 + 新的文本），得到 forward #2
-  6) 将 forward #2 作为合并转发消息发送到触发命令的群聊
-
-依赖：
-  - websockets, pyyaml, pillow, jmcomic, pyzipper
-运行：
-  python -m jm_bot.main
-"""
-
 from __future__ import annotations
 import asyncio
 import re
@@ -53,7 +33,7 @@ CMD_DISABLE = re.compile(r"^\s*[/.!#]?\s*关闭jm\s*$", re.IGNORECASE)
 CMD_HELP = re.compile(r"^\s*[/.!#]?\s*帮助\s*$", re.IGNORECASE)
 CMD_UPDATE = re.compile(r"^\s*[/.!#]?\s*更新jm\s*$", re.IGNORECASE)
 
-# 预览页数量（发送给自己）
+# 预览页数量
 PREVIEW_IMAGE_COUNT = 3
 WORK_ROOT = "jm_bot/.work"
 CLEANUP_AFTER_SEND = True
