@@ -4,6 +4,7 @@
 - 监听群消息，匹配命令：jm <album_id>
 - 使用 jm_bot/jm_pdf/config.yml 配置，通过 jmcomic 下载目标漫画到本地
 - 对该漫画目录执行 PDF 合成
+- 对 PDF 进行 ZIP 加密压缩（随机 6 位数字密码）
 - 按步骤与顺序：
   1) 把漫画（若干预览页）发给自己（私聊图片）
   2) 再给自己发一条漫画信息（文本）
@@ -13,7 +14,7 @@
   6) 将 forward #2 作为合并转发消息发送到触发命令的群聊
 
 依赖：
-  - websockets, pyyaml, pillow, jmcomic
+  - websockets, pyyaml, pillow, jmcomic, pyzipper
 运行：
   python -m jm_bot.main
 """
@@ -23,6 +24,8 @@ import asyncio
 import re
 import os
 import json
+import random
+import string
 from typing import Any, Dict, List, Optional, Tuple
 import pathlib
 import yaml
@@ -82,6 +85,51 @@ def _proc_download_album(album_id: str, jm_yaml_path: str) -> None:
     import jmcomic
     jm_opt = jmcomic.JmOption.from_file(jm_yaml_path)
     jmcomic.download_album(str(album_id), jm_opt)
+
+def _generate_random_password(length: int = 6) -> str:
+    """生成随机 6 位数字密码"""
+    return ''.join(random.choices(string.digits, k=length))
+
+
+def _get_pip_command() -> list:
+    """
+    获取当前 Python 环境的 pip 命令。
+    使用 sys.executable -m pip 确保使用正确的 pip，支持 pipx/venv 等环境。
+    """
+    import sys
+    return [sys.executable, "-m", "pip"]
+
+
+def _proc_create_encrypted_zip(pdf_path: str, output_dir: str) -> Tuple[Optional[str], str]:
+    """
+    创建加密的 ZIP 压缩包。
+    返回 (压缩包路径，密码)
+    """
+    try:
+        import pyzipper
+    except ImportError:
+        log_warn("未安装 pyzipper，尝试安装...")
+        import subprocess
+        subprocess.check_call(_get_pip_command() + ["install", "pyzipper"])
+        import pyzipper
+    
+    password = _generate_random_password(6)
+    pdf_name = os.path.basename(pdf_path)
+    zip_name = f"（密码：{password}）.zip"
+    zip_path = os.path.join(output_dir, zip_name)
+    
+    # 使用 AES 加密创建 ZIP
+    with pyzipper.AESZipFile(
+        zip_path, 'w',
+        compression=pyzipper.ZIP_LZMA,
+        encryption=pyzipper.WZ_AES
+    ) as zf:
+        zf.setpassword(password.encode('ascii'))
+        zf.write(pdf_path, pdf_name)
+    
+    log_info(f"已创建加密压缩包：{zip_path}, 密码：{password}")
+    return zip_path, password
+
 
 def _proc_all2pdf(album_dir: str, base_dir: str, title: str) -> Optional[str]:
     from jm_bot.jm_pdf import all2PDF  # 延迟导入以避免主进程加载时的依赖问题
@@ -321,50 +369,65 @@ async def handle_jm_command(client: OneBotWSClient, cfg: AppConfig, group_id: in
     except Exception as e:
         log_warn(f"PDF 合成失败（继续流程，仅发送图片与文本）：{e!r}")
 
-    # 3) 直接向群发送 PDF（优先尝试群文件上传），并发送详细信息
-    ok = False
-    last_exc_tb: Optional[str] = None
-    pdf_sent_info = None
+    # 创建加密 ZIP 压缩包
+    zip_path: Optional[str] = None
+    zip_password: Optional[str] = None
     if pdf_path and os.path.exists(pdf_path):
         try:
-            # 优先使用支持的群文件上传接口
-            resp = await client.upload_group_file(group_id, pdf_path, name=os.path.basename(pdf_path))
-            pdf_sent_info = resp
-            status = (resp.get("status") or "").lower()
-            retcode = resp.get("retcode", 0)
-            ok = status == "ok" or retcode == 0
-            if not ok:
-                log_warn(f"upload_group_file 返回非 OK：{resp!r}")
+            loop = asyncio.get_running_loop()
+            zip_path, zip_password = await loop.run_in_executor(_get_process_pool(), _proc_create_encrypted_zip, pdf_path, base_dir)
+            log_info(f"压缩包已创建：{zip_path}, 密码：{zip_password}")
         except Exception as e:
-            log_warn(f"upload_group_file 失败，尝试回退：{e!r}")
-            try:
-                # 回退到标准的文件段发送（部分实现支持）
-                await _call_and_get_message_id(client.send_group_message(group_id, [MSG.file_segment(pdf_path, name=os.path.basename(pdf_path))]))
-                ok = True
-            except Exception as e2:
-                last_exc_tb = "".join(traceback.format_exception(type(e2), e2, e2.__traceback__))
-                log_warn(f"回退发送文件段失败：{e2!r}")
+            log_warn(f"创建加密压缩包失败：{e!r}")
+            zip_path = None
+
+    # 3) 向群发送加密压缩包（只发送一次，不回退）
+    ok = False
+    last_exc_tb: Optional[str] = None
+    file_sent_info = None
+    file_to_send = zip_path if (zip_path and os.path.exists(zip_path)) else pdf_path
+    
+    if file_to_send and os.path.exists(file_to_send):
+        file_name = os.path.basename(file_to_send)
+        try:
+            # 优先使用支持的群文件上传接口
+            resp = await client.upload_group_file(group_id, file_to_send, name=file_name)
+            file_sent_info = resp
+            # 只要返回了响应就认为成功
+            ok = True
+            log_info(f"upload_group_file 完成：{resp}")
+        except Exception as e:
+            # 异常时记录日志
+            log_warn(f"upload_group_file 异常：{e!r}")
+            last_exc_tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
     else:
-        log_warn("未生成 PDF，无法发送到群")
+        log_warn("未生成文件，无法发送到群")
 
-    # 发送详细信息到群（包含 album_id, 本地目录, PDF 文件名/状态, 总图片数）
-    try:
-        # 统计图片总数作为参考
-        total_images = 0
-        root = pathlib.Path(album_dir)
-        chapters = _list_numeric_subdirs(root)
-        if not chapters:
-            chapters = [root]
-        for ch in chapters:
-            total_images += len(_list_images_in_dir(ch))
+    # 发送详细信息到群（只有在成功发送 ZIP 压缩包时才发送详情）
+    if ok and zip_path and zip_password:
+        try:
+            # 统计图片总数作为参考
+            total_images = 0
+            root = pathlib.Path(album_dir)
+            chapters = _list_numeric_subdirs(root)
+            if not chapters:
+                chapters = [root]
+            for ch in chapters:
+                total_images += len(_list_images_in_dir(ch))
 
-        info_text = (
-            f"漫画ID: {album_id}\n目录: {album_dir}\n图片数量: {total_images}\n"
-            f"PDF: {os.path.basename(pdf_path) if pdf_path else '(未生成)'}"
-        )
-        await _call_and_get_message_id(client.send_group_message(group_id, [MSG.text(info_text)]))
-    except Exception as e:
-        log_warn(f"发送信息到群失败：{e!r}")
+            # 获取漫画名字（从目录名提取）
+            comic_name = os.path.basename(album_dir)
+            
+            info_text = (
+                f"📚 漫画：{comic_name}\n"
+                f"漫画 ID: {album_id}\n"
+                f"图片数量：{total_images}\n"
+                f"压缩包：{os.path.basename(zip_path)}\n"
+                f"解压密码：{zip_password}"
+            )
+            await _call_and_get_message_id(client.send_group_message(group_id, [MSG.text(info_text)]))
+        except Exception as e:
+            log_warn(f"发送信息到群失败：{e!r}")
 
     if ok:
         await _call_and_get_message_id(client.send_group_message(group_id, [MSG.text(f"已完成 jm {album_id} 的发送。")]))
@@ -447,10 +510,10 @@ async def handle_update_command(client: OneBotWSClient, cfg: AppConfig, group_id
     )
     
     try:
-        # 执行 pip install --upgrade jmcomic
+        # 执行 pip install --upgrade jmcomic (使用通用 pip 命令，支持 pipx/venv 等环境)
         log_info("开始更新 jmcomic 库...")
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "jmcomic"],
+            _get_pip_command() + ["install", "--upgrade", "jmcomic"],
             capture_output=True,
             text=True,
             timeout=120

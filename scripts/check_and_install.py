@@ -28,6 +28,8 @@ REQUIRES: List[Tuple[str, str, str, Optional[str]]] = [
     ("PIL", "Pillow", "", None),
     # For JM downloads
     ("jmcomic", "jmcomic", "", None),
+    # For encrypted ZIP compression
+    ("pyzipper", "pyzipper", "", None),
 ]
 
 # Tsinghua mirror for better reliability in CN networks
