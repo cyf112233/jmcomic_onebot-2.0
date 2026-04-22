@@ -370,16 +370,21 @@ async def handle_jm_command(client: OneBotWSClient, cfg: AppConfig, group_id: in
     if file_to_send and os.path.exists(file_to_send):
         file_name = os.path.basename(file_to_send)
         try:
-            # 优先使用支持的群文件上传接口
-            resp = await client.upload_group_file(group_id, file_to_send, name=file_name)
+            # 使用群文件上传接口发送（增加超时时间，大文件可能需要更久）
+            resp = await client.upload_group_file(group_id, file_to_send, name=file_name, timeout=120.0)
             file_sent_info = resp
             # 只要返回了响应就认为成功
             ok = True
             log_info(f"upload_group_file 完成：{resp}")
+        except asyncio.TimeoutError:
+            # 超时错误：文件可能已经发送成功，只是响应慢了
+            log_warn("upload_group_file 超时（文件可能已发送成功）")
+            ok = True  # 视为成功，避免误报
         except Exception as e:
-            # 异常时记录日志
-            log_warn(f"upload_group_file 异常：{e!r}")
+            # 其他异常才认为是失败
+            log_warn(f"upload_group_file 失败：{e!r}")
             last_exc_tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            ok = False
     else:
         log_warn("未生成文件，无法发送到群")
 

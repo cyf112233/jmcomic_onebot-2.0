@@ -287,15 +287,21 @@ class OneBotWSClient:
         params: Dict[str, Any] = {"user_id": int(user_id), "file": uri, "name": name or pathlib.Path(file_path).name}
         return await self.call_api("upload_private_file", params)
 
-    async def upload_group_file(self, group_id: int, file_path: str, name: Optional[str] = None, folder: Optional[str] = None) -> Dict[str, Any]:
+    async def upload_group_file(self, group_id: int, file_path: str, name: Optional[str] = None, folder: Optional[str] = None, timeout: float = 120.0) -> Dict[str, Any]:
         """
         上传群文件（需 OneBot 实现支持，如 go-cqhttp）
+        参数:
+          - group_id: 群号
+          - file_path: 本地路径/URL/base64://
+          - name: 展示名称（默认取文件名）
+          - folder: 群文件夹目录（可选）
+          - timeout: API 调用超时时间（秒），默认 120 秒以适应大文件上传
         """
         uri = _to_file_uri(file_path)
         params: Dict[str, Any] = {"group_id": int(group_id), "file": uri, "name": name or pathlib.Path(file_path).name}
         if folder:
             params["folder"] = folder
-        return await self.call_api("upload_group_file", params)
+        return await self.call_api("upload_group_file", params, timeout=timeout)
     # -------------------------
     # 内部辅助
     # -------------------------
