@@ -39,6 +39,8 @@ class FakeClient:
         self.group_messages = []
         self.private_messages = []
         self.uploads = []
+        self.deleted = []
+        self._next_message_id = 1
 
     @staticmethod
     def _text(message):
@@ -49,7 +51,18 @@ class FakeClient:
         )
 
     async def send_group_message(self, group_id, message):
-        self.group_messages.append((group_id, self._text(message)))
+        text = self._text(message)
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        self.group_messages.append((group_id, text))
+        return {
+            "status": "ok",
+            "retcode": 0,
+            "data": {"message_id": message_id},
+        }
+
+    async def delete_message(self, message_id):
+        self.deleted.append(message_id)
         return {"status": "ok", "retcode": 0}
 
     async def send_private_message(self, user_id, message):
@@ -104,7 +117,8 @@ def test_multi_chapter_is_rejected_before_download(tmp_path):
     assert any("正在检查" in text for text in texts)
     assert any("多章节" in text for text in texts)
     assert any("章节数：3" in text for text in texts)
-    assert not any("开始下载" in text for text in texts)
+    assert not any("正在下载" in text for text in texts)
+    assert client.deleted == []
     assert calls == [], "多章节不应进入下载阶段"
     assert client.uploads == []
     assert client.private_messages == []
@@ -142,7 +156,8 @@ def test_enabled_group_rejects_multi_chapter(tmp_path):
 
     assert any("正在检查" in text for text in texts)
     assert any("多章节" in text for text in texts)
-    assert not any("开始下载" in text for text in texts)
+    assert not any("正在下载" in text for text in texts)
+    assert client.deleted == []
     assert calls == []
 
 

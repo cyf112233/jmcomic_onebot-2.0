@@ -2,6 +2,7 @@
 """单章节完整流水线测试（使用真实 PDF / ZIP 逻辑与进程池）。"""
 
 import asyncio
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -24,6 +25,8 @@ class FakeClient:
     def __init__(self):
         self.texts = []
         self.uploads = []
+        self.deleted = []
+        self._next_message_id = 1
 
     @staticmethod
     def _text(message):
@@ -34,7 +37,18 @@ class FakeClient:
         )
 
     async def send_group_message(self, group_id, message):
-        self.texts.append(self._text(message))
+        text = self._text(message)
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        self.texts.append(text)
+        return {
+            "status": "ok",
+            "retcode": 0,
+            "data": {"message_id": message_id},
+        }
+
+    async def delete_message(self, message_id):
+        self.deleted.append(message_id)
         return {"status": "ok", "retcode": 0}
 
     async def send_private_message(self, user_id, message):
@@ -89,7 +103,18 @@ def test_single_chapter_pipeline(tmp_path):
     success = client.texts[-1]
     assert "已发送" in success
     assert "单章测试" in success
+    assert "页数：2" in success
     assert "解压密码" in success
+
+    # 发送“正在下载”后撤回“正在检查”（第一条消息 ID 为 1）
+    assert any("正在检查" in text for text in client.texts)
+    assert any("正在下载" in text for text in client.texts)
+    assert not any("开始下载" in text for text in client.texts)
+    assert client.deleted == [1]
+
+    password = re.search(r"解压密码：(\d+)", success)
+    assert password is not None
+    assert password.group(1) not in upload_path.name
 
     # 任务目录已清理，不残留 <album>-<timestamp>-<hex>
     work = tmp_path / "work"

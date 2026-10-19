@@ -101,6 +101,23 @@ def _clip(text: str, limit: int) -> str:
     return text[: max(0, limit - 1)] + "…"
 
 
+def _extract_message_id(response: Any) -> Optional[int]:
+    """从 OneBot 发送响应中提取 message_id。"""
+    if not isinstance(response, dict):
+        return None
+
+    data = response.get("data") or {}
+    message_id = data.get("message_id")
+    if message_id is None:
+        message_id = response.get("message_id")
+
+    if isinstance(message_id, int):
+        return message_id
+    if isinstance(message_id, str) and message_id.isdigit():
+        return int(message_id)
+    return None
+
+
 def _running_in_venv() -> bool:
     # 只信任 sys.prefix，避免继承到错误的 VIRTUAL_ENV 环境变量后
     # 误把系统 Python 当成虚拟环境执行 pip。
@@ -292,6 +309,36 @@ class JmBot:
             log_warn(f"发送群消息失败 group={group_id}：{exc!r}")
             return False
 
+    async def _send_group_with_id(
+        self, group_id: int, text: str
+    ) -> Optional[int]:
+        """发送群消息并返回 message_id（用于稍后撤回）。"""
+        try:
+            response = await self.client.send_group_message(
+                int(group_id), [MSG.text(str(text))]
+            )
+        except Exception as exc:
+            log_warn(f"发送群消息失败 group={group_id}：{exc!r}")
+            return None
+        return _extract_message_id(response)
+
+    async def _delete_group_message(
+        self, message_id: Optional[int]
+    ) -> bool:
+        if message_id is None:
+            return False
+        try:
+            response = await self.client.delete_message(message_id)
+        except Exception as exc:
+            log_warn(f"撤回消息失败 message_id={message_id}：{exc!r}")
+            return False
+        if not is_api_success(response):
+            log_warn(
+                f"撤回消息失败 message_id={message_id}：{response}"
+            )
+            return False
+        return True
+
     async def _notify_admins(self, text: str) -> None:
         if not self.cfg.bot.notify_admins_on_error or not self._admin_ids:
             return
@@ -426,7 +473,7 @@ class JmBot:
     async def handle_jm_command(self, group_id: int, album_id: str) -> None:
         """下载并发送一本漫画；多章节会在下载前直接拒绝。"""
         album_id = str(album_id)
-        await self._send_group(
+        check_message_id = await self._send_group_with_id(
             group_id, f"正在检查 jm {album_id} ……"
         )
         log_info(f"开始检查：group={group_id} album={album_id}")
@@ -463,9 +510,11 @@ class JmBot:
             )
             return
 
-        await self._send_group(
-            group_id, f"开始下载 jm {album_id}，请稍候……"
+        download_sent = await self._send_group(
+            group_id, f"正在下载 jm {album_id} ……"
         )
+        if download_sent:
+            await self._delete_group_message(check_message_id)
         await self._process_album(group_id, album_id, meta)
 
     async def _fetch_meta(

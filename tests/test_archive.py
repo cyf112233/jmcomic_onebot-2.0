@@ -34,7 +34,7 @@ def test_create_encrypted_archive(tmp_path):
 
     assert result.password == "123456"
     assert result.path.is_file()
-    assert "123456" in result.path.name
+    assert "123456" not in result.path.name
     assert "/" not in result.path.name
     assert ":" not in result.path.name
 

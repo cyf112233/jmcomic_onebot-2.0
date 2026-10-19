@@ -138,9 +138,14 @@ def test_multi_chapter_rejection_text():
 
 def test_success_info_contains_password_and_size():
     result = ArchiveResult(
-        Path("/tmp/不存在的文件（密码123456）.zip"), password="123456"
+        Path("/tmp/不存在的文件.zip"), password="123456"
     )
-    info = format_success_info(None, "123", result)
+    meta = AlbumMeta.from_episodes(
+        "123", "测试漫画", 20, [("111", "1", "第1话")]
+    )
+    info = format_success_info(meta, "123", result)
     assert "123456" in info
     assert "123" in info
+    assert "测试漫画" in info
+    assert "页数：20" in info
     assert "不存在的文件" in info

@@ -17,7 +17,7 @@ import inspect
 import json
 import pathlib
 import random
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import websockets
@@ -332,6 +332,16 @@ class OneBotWSClient:
             "send_group_msg",
             {"group_id": int(group_id), "message": message},
         )
+
+    async def delete_message(
+        self, message_id: Union[int, str]
+    ) -> Dict[str, Any]:
+        """撤回一条消息（OneBot v11 ``delete_msg``）。"""
+        try:
+            normalized: Union[int, str] = int(message_id)
+        except (TypeError, ValueError):
+            normalized = message_id
+        return await self.call_api("delete_msg", {"message_id": normalized})
 
     async def send_private_forward(
         self, user_id: int, nodes: List[Dict[str, Any]]

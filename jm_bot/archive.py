@@ -41,8 +41,8 @@ def create_archive(
 ) -> ArchiveResult:
     """把生成的 PDF 打包为 ZIP。
 
-    ``encrypt=True`` 时使用 pyzipper 的 AES 加密；密码写在压缩包
-    文件名中，即使群消息发送失败用户也能看到密码。
+    ``encrypt=True`` 时使用 pyzipper 的 AES 加密。密码只通过
+    ``ArchiveResult.password`` 返回并由群消息发送，不写入文件名。
     """
     source_path = Path(source)
     if not source_path.is_file():
@@ -59,10 +59,7 @@ def create_archive(
         max_length=80,
     )
 
-    if encrypt:
-        file_name = f"{base_name}（密码{archive_password}）.zip"
-    else:
-        file_name = f"{base_name}.zip"
+    file_name = f"{base_name}.zip"
 
     target = output_path / file_name
     if target.exists():
