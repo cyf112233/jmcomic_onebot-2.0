@@ -117,10 +117,22 @@ def _is_project_venv(cfg: AppConfig) -> bool:
     return current == expected or expected in current.parents
 
 
+# 与 requirements.txt 保持一致：在线更新只允许升级到受支持的主版本
+JMCOMIC_UPGRADE_SPEC = "jmcomic>=2.7.9,<3.0"
+
+
 def _pip_upgrade_jmcomic(timeout: int) -> subprocess.CompletedProcess:
     """在虚拟环境内升级 jmcomic（阻塞函数，放到线程执行）。"""
     return subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", "jmcomic"],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--upgrade",
+            JMCOMIC_UPGRADE_SPEC,
+        ],
         capture_output=True,
         text=True,
         timeout=timeout,
