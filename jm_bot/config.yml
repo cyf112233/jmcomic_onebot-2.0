@@ -1,42 +1,87 @@
-# OneBot 正向 WebSocket 客户端配置（统一连接地址）
-# 参考 onebot协议wiki/communication/ws.md 与 authorization.md
-# - OneBot 侧需要启用 ws.enable 并监听指定端口
-# - 推荐使用统一的 “/” 路径：同一条连接同时提供 /api 与 /event
-# - 如果 OneBot 配置了 auth.access_token，这里也需要填写相同的 token
+# OneBot 正向 WebSocket 客户端配置
+#
+# OneBot 端（NapCat / go-cqhttp 等）需要启用正向 WebSocket 服务，
+# 默认地址通常为 ws://127.0.0.1:6700/。
+# 如果 OneBot 端配置了 access_token，这里必须填写相同的值。
 
 onebot:
-  # OneBot WebSocket 服务统一地址。默认 127.0.0.1:6700
-  # 常见可选： ws://127.0.0.1:6700/   或 ws://127.0.0.1:6700/api 以及 /event
-  # 建议优先使用根路径 / 作为统一地址
+  # 统一连接地址：同一条连接同时处理事件与 API 调用
   ws_url: "ws://127.0.0.1:6700/"
 
-  # 访问令牌。若 OneBot 端配置了 auth.access_token，则必须一致
-  # 连接时将通过请求头 Authorization: Bearer <token> 传递
+  # 访问令牌；为空表示 OneBot 端未启用鉴权
   access_token: ""
 
   # 连接超时（秒）
   connect_timeout: 10
 
-  # 断线自动重连间隔（秒）
+  # 断线重连基础间隔（秒），实际会指数退避
   reconnect_interval: 3
 
-  # 是否通过 Query 传递 token（仅在无法设置请求头时开启）
-  # 开启后将附加 ?access_token=<token> 到 WS URL
+  # 是否把 token 放到 query（?access_token=...）
+  # 默认通过 Authorization: Bearer 请求头传递；若客户端不支持请求头可改为 true
   use_query_token: false
 
-# 机器人自身的一些可选配置（按需扩展）
+
 bot:
-  # 可选：用于过滤事件或做本机标识；不影响协议
+  # 机器人名称（仅用于标识）
   name: "jm-bot"
-  # 可选：启动时是否打印原始事件 JSON
+
+  # 是否打印收到的原始事件；生产环境可设为 false 减少日志
   verbose_event_log: true
 
-  # 是否启用“分群冷却”
-  # 开启后，每个群在执行一次 /jm 命令后会进入独立的冷却计时，冷却结束前拒绝再次执行
-  per_group_cooldown_enabled: true
-  # 分群冷却时间（秒）。仅在 per_group_cooldown_enabled 为 true 时生效
-  per_group_cooldown_seconds: 60
-
-  # 机器人管理员QQ号列表（仅这些QQ可使用 /开启jm 与 /关闭jm）
+  # 机器人管理员 QQ 列表（仅这些 QQ 可执行开启/关闭/更新命令）
   # 示例：admins: [12345678, 23456789]
   admins: []
+
+  # ============ 多章节策略 ============
+  # true：检测到多章节漫画时直接拒绝，不下载（推荐，默认）
+  # false：允许下载并尝试把所有章节合并为一个 PDF（可能非常大）
+  reject_multi_chapter: true
+
+  # ============ 群与冷却 ============
+  # 新群默认是否开启（false 表示需要管理员发送 /开启jm）
+  group_enabled_by_default: false
+
+  # 每次 /jm 处理结束后，本群进入独立冷却
+  per_group_cooldown_enabled: true
+  per_group_cooldown_seconds: 60
+
+  # ============ 路径（相对项目根目录） ============
+  # 机器人只会清理本目录下符合任务命名规则的子目录
+  work_dir: "data/work"
+  # 群开关持久化文件，不能位于 work_dir 内
+  state_file: "data/group_state.json"
+  # jmcomic 下载配置
+  jmcomic_config: "jm_bot/jm_pdf/config.yml"
+
+  # ============ 下载与 PDF ============
+  # 下载/PDF/压缩共用的工作进程数；1 可避免并发下载触发风控
+  download_workers: 1
+  # 读取漫画元数据的超时（秒）
+  metadata_timeout: 60
+  # PDF 分辨率（72-600）
+  pdf_resolution: 150
+  # PDF 单页最大宽度（像素），0 表示不缩放
+  pdf_max_width: 0
+  # 调试用：任务结束后保留临时文件
+  keep_files: false
+
+  # ============ 压缩包 ============
+  # 是否使用 pyzipper 创建 AES 加密 ZIP
+  zip_encrypt: true
+  # 纯数字密码长度（4-32）
+  zip_password_length: 6
+
+  # ============ 上传与更新 ============
+  # upload_group_file 的超时（秒）
+  upload_timeout: 300
+  # /更新jm 执行 pip 的超时（秒）
+  update_timeout: 180
+
+  # ============ 日志与通知 ============
+  # 处理失败时是否私聊管理员
+  notify_admins_on_error: true
+  # DEBUG / INFO / WARNING / ERROR
+  log_level: "INFO"
+  # 日志文件路径，留空表示只输出到控制台
+  log_file: ""

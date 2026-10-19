@@ -7,11 +7,11 @@ OneBot v11 消息段（数组格式）构造工具
 """
 
 from __future__ import annotations
-from typing import Dict, Any, List, Optional, Union
+
 import base64
 import pathlib
 import re
-
+from typing import Any, Dict, List, Optional, Union
 
 MessageSegment = Dict[str, Any]
 Message = List[MessageSegment]
@@ -133,7 +133,12 @@ def share(url: str, title: str, content_text: Optional[str] = None, image_url: O
     return _seg("share", data)
 
 
-def location(lat: Union[str, float], lon: Union[str, float], title: Optional[str] = None, content_text: Optional[str] = None) -> MessageSegment:
+def location(
+    lat: Union[str, float],
+    lon: Union[str, float],
+    title: Optional[str] = None,
+    content_text: Optional[str] = None,
+) -> MessageSegment:
     data: Dict[str, Any] = {"lat": str(lat), "lon": str(lon)}
     if title:
         data["title"] = title
@@ -147,7 +152,13 @@ def music_platform(type_: str, song_id: Union[int, str]) -> MessageSegment:
     return _seg("music", {"type": type_, "id": str(song_id)})
 
 
-def music_custom(url: str, audio: str, title: str, content_text: Optional[str] = None, image_url: Optional[str] = None) -> MessageSegment:
+def music_custom(
+    url: str,
+    audio: str,
+    title: str,
+    content_text: Optional[str] = None,
+    image_url: Optional[str] = None,
+) -> MessageSegment:
     data: Dict[str, Any] = {"type": "custom", "url": url, "audio": audio, "title": title}
     if content_text:
         data["content"] = content_text

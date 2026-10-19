@@ -1,67 +1,227 @@
-import jmcomic, os, time, yaml
-from PIL import Image
+# -*- coding: utf-8 -*-
+"""图片目录 -> PDF。
 
-def all2PDF(input_folder, pdfpath, pdfname):
-    start_time = time.time()
-    paht = input_folder
-    zimulu = []  # 子目录（里面为image）
-    image = []  # 子目录图集
-    sources = []  # pdf格式的图
+针对原实现的几个问题做了修正：
 
-    with os.scandir(paht) as entries:
+* 不再只处理 JPEG；
+* 不再依赖“第一张图是不是 jpg”这种脆弱逻辑；
+* 支持 PNG/WebP/BMP/TIFF 等格式，并处理透明通道与 EXIF 方向；
+* 空目录、损坏图片会给出明确异常或告警；
+* 输出文件名做了跨平台清理。
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+from typing import List, Optional, Sequence, Union
+
+from PIL import Image, ImageFile, ImageOps
+
+from ..logging_utils import log_info, log_warn
+from ..paths import IMAGE_SUFFIXES, has_image_files, natural_key
+
+# 部分漫画图片尾部可能被截断，尽量读取而不是直接报错
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+class PdfError(Exception):
+    """PDF 生成失败。"""
+
+
+def collect_images(
+    chapter_dirs: Union[str, Path, Sequence[Union[str, Path]]],
+) -> List[Path]:
+    """按目录顺序收集图片，并在每个目录内做自然排序。"""
+    if isinstance(chapter_dirs, (str, Path)):
+        directories = [Path(chapter_dirs)]
+    else:
+        directories = [Path(item) for item in chapter_dirs]
+
+    files: List[Path] = []
+    for directory in directories:
+        if not directory.is_dir():
+            log_warn(f"章节目录不存在，已跳过：{directory}")
+            continue
+        try:
+            entries = sorted(directory.iterdir(), key=natural_key)
+        except OSError as exc:
+            log_warn(f"无法读取章节目录 {directory}：{exc}")
+            continue
+
         for entry in entries:
-            if entry.is_dir():
-                zimulu.append(int(entry.name))
-    # 对数字进行排序
-    zimulu.sort()
+            if entry.is_file() and entry.suffix.lower() in IMAGE_SUFFIXES:
+                files.append(entry)
 
-    for i in zimulu:
-        with os.scandir(paht + "/" + str(i)) as entries:
-            for entry in entries:
-                if entry.is_dir():
-                    print("这一级不应该有自录")
-                if entry.is_file():
-                    image.append(paht + "/" + str(i) + "/" + entry.name)
-
-    if "jpg" in image[0]:
-        output = Image.open(image[0])
-        image.pop(0)
-
-    for file in image:
-        if "jpg" in file:
-            img_file = Image.open(file)
-            if img_file.mode == "RGB":
-                img_file = img_file.convert("RGB")
-            sources.append(img_file)
-
-    pdf_file_path = pdfpath + "/" + pdfname
-    if pdf_file_path.endswith(".pdf") == False:
-        pdf_file_path = pdf_file_path + ".pdf"
-    output.save(pdf_file_path, "pdf", save_all=True, append_images=sources)
-    end_time = time.time()
-    run_time = end_time - start_time
-    print("运行时间：%3.2f 秒" % run_time)
+    return files
 
 
-if __name__ == "__main__":
-    # 自定义设置：
-    config = "D:/18comic_down/code/config.yml"
-    loadConfig = jmcomic.JmOption.from_file(config)
-    #如果需要下载，则取消以下注释
-    # manhua = ['146417']
-    # for id in manhua:
-    #     jmcomic.download_album(id,loadConfig)
+def _to_pdf_mode(image: Image.Image) -> Image.Image:
+    """把图片转换为 PDF 可保存的模式，透明背景填白。"""
+    if image.mode in ("RGB", "L"):
+        return image
 
-    with open(config, "r", encoding="utf8") as f:
-        data = yaml.load(f, Loader=yaml.FullLoader)
-        path = data["dir_rule"]["base_dir"]
+    if image.mode in ("RGBA", "LA", "P"):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[-1])
+        return background
 
-    with os.scandir(path) as entries:
-        for entry in entries:
-            if entry.is_dir():
-                if os.path.exists(os.path.join(path +'/' +entry.name + ".pdf")):
-                    print("文件：《%s》 已存在，跳过" % entry.name)
+    return image.convert("RGB")
+
+
+def build_pdf(
+    chapter_dirs: Union[str, Path, Sequence[Union[str, Path]]],
+    output_path: Union[str, Path],
+    title: Optional[str] = None,
+    *,
+    resolution: float = 150.0,
+    max_width: int = 0,
+) -> Path:
+    """把多个章节目录中的图片合成为一个 PDF，返回输出路径。"""
+    files = collect_images(chapter_dirs)
+    if not files:
+        raise PdfError("没有找到可用的图片，无法生成 PDF。")
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    started = time.monotonic()
+    images: List[Image.Image] = []
+    resources: List[Image.Image] = []
+
+    try:
+        for image_path in files:
+            try:
+                image = Image.open(image_path)
+            except Exception as exc:
+                log_warn(f"跳过无法读取的图片 {image_path.name}：{exc}")
+                continue
+
+            resources.append(image)
+
+            try:
+                # 处理手机拍照/扫描件的方向信息
+                try:
+                    orientation = image.getexif().get(0x0112)
+                except Exception:
+                    orientation = None
+                if orientation in (2, 3, 4, 5, 6, 7, 8):
+                    transposed = ImageOps.exif_transpose(image)
+                    if transposed is not image:
+                        resources.append(transposed)
+                        image = transposed
+
+                converted = _to_pdf_mode(image)
+                if converted is not image:
+                    resources.append(converted)
+                image = converted
+
+                if max_width > 0 and image.width > max_width:
+                    ratio = max_width / float(image.width)
+                    resized = image.resize(
+                        (max_width, max(1, round(image.height * ratio))),
+                        Image.LANCZOS,
+                    )
+                    resources.append(resized)
+                    image = resized
+
+                if image.width <= 0 or image.height <= 0:
+                    log_warn(f"跳过尺寸异常的图片：{image_path.name}")
                     continue
-                else:
-                    print("开始转换：%s " % entry.name)
-                    all2PDF(path + "/" + entry.name, path, entry.name)
+
+                images.append(image)
+            except Exception as exc:
+                log_warn(f"跳过处理失败的图片 {image_path.name}：{exc}")
+                continue
+
+        if not images:
+            raise PdfError("所有图片都无法读取，无法生成 PDF。")
+
+        save_kwargs = {
+            "save_all": True,
+            "append_images": images[1:],
+            "resolution": float(resolution),
+        }
+        if title:
+            save_kwargs["title"] = str(title)
+
+        try:
+            images[0].save(output, "PDF", **save_kwargs)
+        except Exception as exc:
+            raise PdfError(f"写入 PDF 失败：{exc}") from exc
+    finally:
+        # 关闭所有打开/创建的图像对象
+        for resource in resources:
+            try:
+                resource.close()
+            except Exception:
+                pass
+
+    elapsed = time.monotonic() - started
+    log_info(
+        f"PDF 生成完成：{output.name}（{len(images)} 页，"
+        f"{elapsed:.1f} 秒）"
+    )
+    return output
+
+
+def all2PDF(input_folder: Union[str, Path], pdfpath: Union[str, Path], pdfname: str) -> str:
+    """兼容旧版调用：把单个章节目录转换为 PDF。"""
+    output = Path(pdfpath) / str(pdfname)
+    if output.suffix.lower() != ".pdf":
+        output = output.with_suffix(".pdf")
+
+    result = build_pdf([input_folder], output, title=output.stem)
+    return str(result)
+
+
+def _main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m jm_bot.jm_pdf",
+        description="把漫画图片目录合成为 PDF",
+    )
+    parser.add_argument("input", help="章节目录，或包含章节目录的漫画目录")
+    parser.add_argument("output", help="输出 PDF 路径")
+    parser.add_argument(
+        "--max-width",
+        type=int,
+        default=0,
+        help="限制单页最大宽度（像素），0 表示不限制",
+    )
+    args = parser.parse_args(argv)
+
+    input_path = Path(args.input)
+    if not input_path.is_dir():
+        parser.error(f"输入目录不存在：{input_path}")
+
+    directories: Sequence[Path]
+    if has_image_files(input_path):
+        directories = [input_path]
+    else:
+        try:
+            directories = [
+                entry
+                for entry in sorted(input_path.iterdir(), key=natural_key)
+                if entry.is_dir() and has_image_files(entry)
+            ]
+        except OSError as exc:
+            parser.error(f"无法读取输入目录：{exc}")
+
+    if not directories:
+        parser.error("输入目录中没有找到图片")
+
+    output = Path(args.output)
+    result = build_pdf(
+        directories,
+        output,
+        title=output.stem,
+        max_width=max(0, args.max_width),
+    )
+    print(result)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())

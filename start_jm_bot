@@ -1,40 +1,63 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# ============================================================
+# JM Bot launcher (Linux / macOS)
+#
+# - 首次运行会在项目内创建 .venv 并安装 requirements.txt
+# - 不会向系统 Python 安装任何包（避免 PEP 668 错误）
+# - 通过 JM_BOT_PYTHON 指定已有环境时只做依赖检查，不安装
+# - 机器人以退出码 3 请求重启时自动重新启动
+#
+# 用法：
+#   ./start_jm_bot
+#   ./start_jm_bot --check
+#   JM_BOT_PYTHON=/path/to/venv/bin/python ./start_jm_bot
+# ============================================================
 
-# ============================================
-# JM Bot launcher (Linux/macOS)
-# - Check and install missing dependencies
-# - Launch the bot main module
-# Usage: run in terminal with ./launch.sh
-# ============================================
+set -u
 
-# Change to the script directory
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
-# Choose Python launcher
-if command -v python3 &>/dev/null; then
+if [ -n "${JM_BOT_PYTHON:-}" ]; then
+    PY="$JM_BOT_PYTHON"
+elif command -v python3 >/dev/null 2>&1; then
     PY="python3"
-else
+elif command -v python >/dev/null 2>&1; then
     PY="python"
+else
+    echo "[ERR] 未找到 Python 3。请先安装 Python 3.9+。" >&2
+    echo "      Debian/Ubuntu: sudo apt install python3 python3-venv" >&2
+    exit 1
 fi
 
-echo "[INFO] Using interpreter: $PY"
-$PY --version
-
-echo
-echo "[STEP] Checking and installing dependencies..."
-$PY scripts/check_and_install.py
-RC=$?
-if [ "$RC" -ne 0 ]; then
-    echo "[WARN] Dependency check returned: $RC. Trying to launch anyway..."
+if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    echo "[ERR] 需要 Python 3.9+，当前解释器不可用或版本过低：$PY" >&2
+    exit 1
 fi
 
-echo
-echo "[STEP] Launching JM Bot main..."
-$PY -m jm_bot.main
-APP_RC=$?
-echo
-echo "[EXIT] JM Bot exited with code=$APP_RC"
+echo "[INFO] 检查运行环境 ..."
+if ! APP_PY="$("$PY" scripts/bootstrap.py --print-python)"; then
+    echo "[ERR] 依赖准备失败，请根据上方提示修复后重试。" >&2
+    exit 1
+fi
 
-echo
-read -p "Press enter to continue..."
-exit $APP_RC
+if [ -z "$APP_PY" ] || [ ! -x "$APP_PY" ]; then
+    echo "[ERR] 无法确定可用的 Python 解释器：${APP_PY:-<空>}" >&2
+    exit 1
+fi
+
+RC=0
+while :; do
+    echo "[INFO] 启动 jm-bot ..."
+    "$APP_PY" -m jm_bot.main "$@"
+    RC=$?
+
+    if [ "$RC" -eq 3 ]; then
+        echo "[INFO] 收到重启请求，2 秒后重新启动 ..."
+        sleep 2
+        continue
+    fi
+    break
+done
+
+echo "[INFO] jm-bot 已退出（code=${RC}）"
+exit "$RC"

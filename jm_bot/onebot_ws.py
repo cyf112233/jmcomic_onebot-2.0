@@ -1,336 +1,428 @@
 # -*- coding: utf-8 -*-
-"""
-OneBot v11 正向 WebSocket 客户端（统一连接地址）
+"""OneBot v11 正向 WebSocket 客户端。
 
-功能：
-- 读取 jm_bot/config.yml（通过 jm_bot.config）获取统一 ws_url 与鉴权
-- 建立到 OneBot 的单一 WS 连接（建议使用根路径 /）
-- 解析事件推送（/event），并将其打印到终端（便于调试）
-- 支持在同一连接上进行 API 调用（/api），含 echo 关联与超时
-- 提供发送私聊/群聊消息的便捷方法（数组格式），兼容图片/文件等消息段
+特性：
 
-依赖：
-  - websockets>=10
-  - pyyaml（由 jm_bot.config 使用）
-安装示例：
-  pip install websockets pyyaml
+* 单条连接同时处理事件推送与 API 响应（echo 关联）；
+* 断线自动重连，指数退避；
+* 兼容 websockets 10 ~ 17（请求头参数名不同）；
+* 事件回调以异步任务执行，异常会记录完整堆栈；
+* 日志中的 access_token 会被脱敏。
 """
 
 from __future__ import annotations
+
 import asyncio
+import inspect
 import json
-import time
-from typing import Any, Dict, Optional, Tuple, Callable, List
+import pathlib
+import random
+from typing import Any, Callable, Dict, List, Optional, Set
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import websockets
-from websockets import WebSocketClientProtocol
-from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
-import pathlib
 
-from .config import load_config, build_ws_connect_params, AppConfig, OneBotConfig
-from .message import Message, text
+from .config import AppConfig, OneBotConfig, build_ws_connect_params
+from .logging_utils import format_traceback, log_err, log_info, log_warn
+from .message import Message
 
-# -------------------------
-# 日志输出
-# -------------------------
-def _ts() -> str:
-    return time.strftime("%H:%M:%S")
+# 一条 WS 消息的最大体积（16MB）
+MAX_FRAME_SIZE = 16 * 1024 * 1024
 
-def log_info(msg: str) -> None:
-    print(f"[{_ts()}][INFO] {msg}")
 
-def log_warn(msg: str) -> None:
-    print(f"[{_ts()}][WARN] {msg}")
-
-def log_err(msg: str) -> None:
-    print(f"[{_ts()}][ERR ] {msg}")
-
-# -------------------------
-# URL helpers
-# -------------------------
-def _append_query(url: str, extra_params: Dict[str, str]) -> str:
-    parsed = urlparse(url)
-    qs = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    qs.update({k: v for k, v in extra_params.items() if v is not None})
-    new_query = urlencode(qs)
-    return urlunparse(parsed._replace(query=new_query))
-
-def _to_file_uri(path: str) -> str:
-    if path.startswith("http://") or path.startswith("https://") or path.startswith("base64://") or path.startswith("file://"):
-        return path
-    p = pathlib.Path(path).expanduser().resolve()
-    try:
-        return p.as_uri()
-    except Exception:
-        return str(p)
-
-# -------------------------
-# 工具：将数组格式消息转为终端可读文本
-# -------------------------
-def message_array_to_plain(m: Message) -> str:
-    """
-    将 OneBot 数组格式消息转为简单的终端可读文本，便于调试打印。
-    非 text 段以 [type] 或 [type:brief] 形式提示。
-    """
-    parts = []
-    for seg in m:
-        seg_type = str(seg.get("type", ""))
-        data = seg.get("data") or {}
+def message_array_to_plain(message: Message) -> str:
+    """把数组格式消息转换为终端可读文本。"""
+    parts: List[str] = []
+    for segment in message:
+        seg_type = str(segment.get("type", ""))
+        data = segment.get("data") or {}
         if seg_type == "text":
             parts.append(str(data.get("text", "")))
         elif seg_type == "at":
-            parts.append(f"[@{data.get('qq','')}]")
+            parts.append(f"[@{data.get('qq', '')}]")
         elif seg_type == "image":
-            val = data.get("file", "")
-            brief = "..." if isinstance(val, str) and len(val) > 40 else val
+            value = data.get("file", "")
+            brief = "..." if isinstance(value, str) and len(value) > 40 else value
             parts.append(f"[image:{brief}]")
+        elif seg_type == "reply":
+            parts.append(f"[reply:{data.get('id', '')}]")
         else:
             parts.append(f"[{seg_type}]")
     return "".join(parts)
 
-# -------------------------
-# OneBot 客户端
-# -------------------------
+
+def _redact_url(url: str) -> str:
+    """隐藏 URL query 中的 access_token，避免日志泄露。"""
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    redacted = [
+        (key, "***" if key.lower() in ("access_token", "token") else value)
+        for key, value in pairs
+    ]
+    return urlunparse(parsed._replace(query=urlencode(redacted)))
+
+
+def compute_backoff(
+    attempt: int,
+    base: float,
+    cap: float = 60.0,
+    jitter: float = 0.2,
+) -> float:
+    """第 ``attempt`` 次重连的等待秒数（指数退避 + 抖动）。"""
+    delay = min(max(1.0, float(base)) * (2 ** max(0, int(attempt) - 1)), cap)
+    if jitter > 0:
+        delay += random.uniform(0, delay * jitter)
+    return delay
+
+
+def is_api_success(response: Any) -> bool:
+    """判断 OneBot API 响应是否成功。"""
+    if not isinstance(response, dict):
+        return False
+
+    status = response.get("status")
+    if status is not None and str(status).lower() not in (
+        "ok",
+        "async",
+        "accepted",
+    ):
+        return False
+
+    retcode = response.get("retcode")
+    if retcode is None:
+        return True
+    try:
+        return int(retcode) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _append_query(url: str, extra: Dict[str, str]) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(extra)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _file_value(file_path: str, *, use_uri: bool) -> str:
+    """把本地文件转换为 OneBot 可接受的形式。"""
+    text = str(file_path)
+    if text.startswith(
+        ("http://", "https://", "base64://", "file://")
+    ):
+        return text
+    path = pathlib.Path(text).expanduser().resolve()
+    return path.as_uri() if use_uri else str(path)
+
+
 class OneBotWSClient:
+    """极简 OneBot v11 客户端。"""
+
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self._ob: OneBotConfig = cfg.onebot
-        self._ws: Optional[WebSocketClientProtocol] = None
-        self._recv_task: Optional[asyncio.Task] = None
-
-        # echo -> Future 映射，用于关联 API 请求与响应
+        self._ws: Optional[Any] = None
         self._pending: Dict[str, asyncio.Future] = {}
+        self._event_tasks: Set[asyncio.Task] = set()
         self._echo_seq = 0
+        self._stopping = False
 
-        # 事件回调（可由主逻辑注入）
-        self.on_event: Optional[Callable[[Dict[str, Any]], None]] = None
+        # 由主逻辑注入；可以是普通函数或协程函数
+        self.on_event: Optional[Callable[[Dict[str, Any]], Any]] = None
 
+    # ------------------------------------------------------------------
+    # 连接与接收
+    # ------------------------------------------------------------------
     async def run_forever(self) -> None:
-        """
-        持续重连与运行。
-        """
-        url, headers = build_ws_connect_params(self._ob)
-        reconnect_interval = max(1, int(self._ob.reconnect_interval))
+        """持续连接、接收事件，断线后自动重连。"""
+        attempt = 0
+        base = max(1, int(self._ob.reconnect_interval))
 
-        while True:
+        while not self._stopping:
+            url, kwargs = self._connect_kwargs()
             try:
-                log_info(f"Connecting OneBot WS: {url}")
-                # Normalize auth: move token to query parameter to avoid incompatibility with extra_headers
-                auth = headers.get("Authorization", "")
-                if isinstance(auth, str) and auth.startswith("Bearer "):
-                    token = auth[7:]
-                    url = _append_query(url, {"access_token": token})
-                    headers = {}
-                async with websockets.connect(
-                    url,
-                    open_timeout=self._ob.connect_timeout,
-                    ping_interval=30,
-                    ping_timeout=20,
-                    close_timeout=10,
-                    max_size=16 * 1024 * 1024,  # 保护：最大消息 16MB
-                ) as ws:
+                log_info(f"正在连接 OneBot WS：{_redact_url(url)}")
+                async with websockets.connect(url, **kwargs) as ws:
                     self._ws = ws
-                    log_info("OneBot WS connected.")
-                    await self._handle_connected(ws)
+                    attempt = 0
+                    log_info("OneBot WS 已连接。")
+                    await self._receiver_loop(ws)
+                    if not self._stopping:
+                        log_warn("OneBot WS 连接已关闭。")
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                log_warn(f"WS disconnected: {e!r}")
+            except Exception as exc:
+                if not self._stopping:
+                    log_warn(f"OneBot WS 断开：{exc!r}")
             finally:
                 self._ws = None
-                # 取消接收任务
-                if self._recv_task and not self._recv_task.done():
-                    self._recv_task.cancel()
-                # 将所有 pending 置为异常
-                for echo, fut in list(self._pending.items()):
-                    if not fut.done():
-                        fut.set_exception(RuntimeError("connection lost"))
-                self._pending.clear()
+                self._fail_pending(ConnectionError("OneBot WS 连接已断开"))
 
-            log_info(f"Reconnecting after {reconnect_interval}s ...")
-            await asyncio.sleep(reconnect_interval)
+            if self._stopping:
+                break
 
-    async def _handle_connected(self, ws: WebSocketClientProtocol) -> None:
-        self._recv_task = asyncio.create_task(self._receiver_loop(ws))
-        try:
-            await self._recv_task
-        finally:
-            if self._recv_task and not self._recv_task.done():
-                self._recv_task.cancel()
+            attempt += 1
+            delay = compute_backoff(attempt, base)
+            log_info(f"{delay:.1f} 秒后重连（第 {attempt} 次）……")
+            await asyncio.sleep(delay)
 
-    async def _receiver_loop(self, ws: WebSocketClientProtocol) -> None:
-        """
-        接收循环：处理事件推送与 API 响应。
-        """
+    def _connect_kwargs(self) -> tuple[str, Dict[str, Any]]:
+        url, headers = build_ws_connect_params(self._ob)
+        kwargs: Dict[str, Any] = {
+            "open_timeout": self._ob.connect_timeout,
+            "ping_interval": 30,
+            "ping_timeout": 20,
+            "close_timeout": 10,
+            "max_size": MAX_FRAME_SIZE,
+        }
+
+        if headers:
+            try:
+                parameters = inspect.signature(websockets.connect).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            if "additional_headers" in parameters:
+                kwargs["additional_headers"] = headers
+            elif "extra_headers" in parameters:
+                kwargs["extra_headers"] = headers
+            else:
+                # 老版本 websockets 不支持请求头时退回 query 传 token
+                url = _append_query(
+                    url, {"access_token": self._ob.access_token.strip()}
+                )
+
+        return url, kwargs
+
+    async def _receiver_loop(self, ws: Any) -> None:
         while True:
             raw = await ws.recv()
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="replace")
+
             try:
-                msg = json.loads(raw)
+                message = json.loads(raw)
             except Exception:
-                log_warn(f"Non-JSON frame: {raw!r}")
+                log_warn(f"收到非 JSON 数据：{raw!r}")
                 continue
 
-            # API 响应（带 status/retcode，一般含 echo）
-            if "status" in msg or "retcode" in msg:
-                echo = str(msg.get("echo", ""))
-                fut = self._pending.pop(echo, None)
-                if fut is not None and not fut.done():
-                    fut.set_result(msg)
-                else:
-                    log_warn(f"Unmatched API response: echo={echo} resp={msg}")
+            if not isinstance(message, dict):
+                log_warn(f"收到未知 JSON 结构：{message!r}")
                 continue
 
             # 事件推送
-            if "post_type" in msg:
-                self._handle_event(msg)
+            if "post_type" in message:
+                self._handle_event(message)
                 continue
 
-            log_warn(f"Unknown frame: {msg}")
+            # API 响应
+            if "status" in message or "retcode" in message or "echo" in message:
+                echo = str(message.get("echo", ""))
+                future = self._pending.pop(echo, None)
+                if future is not None and not future.done():
+                    future.set_result(message)
+                else:
+                    log_warn(f"收到无法匹配的 API 响应：echo={echo}")
+                continue
 
-    def _handle_event(self, evt: Dict[str, Any]) -> None:
-        """
-        默认打印到终端。需要时可由主逻辑注入 on_event 进行处理。
-        """
+            log_warn(f"收到未知帧：{message}")
+
+    # ------------------------------------------------------------------
+    # 事件
+    # ------------------------------------------------------------------
+    def _handle_event(self, event: Dict[str, Any]) -> None:
         if self.cfg.bot.verbose_event_log:
-            self._print_event(evt)
-        if self.on_event:
-            try:
-                self.on_event(evt)
-            except Exception as e:
-                log_err(f"on_event error: {e!r}")
+            self._print_event(event)
 
-    def _print_event(self, evt: Dict[str, Any]) -> None:
-        pt = evt.get("post_type")
-        if pt == "message":
-            mtype = evt.get("message_type")
-            user_id = evt.get("user_id")
-            group_id = evt.get("group_id")
-            message = evt.get("message")
+        if self.on_event is None:
+            return
 
-            # message 既可能是字符串，也可能是数组格式
-            if isinstance(message, list):
-                plain = message_array_to_plain(message)  # 数组格式转可读文本
-            else:
-                plain = str(message)
+        try:
+            result = self.on_event(event)
+        except Exception as exc:
+            log_err(
+                f"事件回调同步异常：{exc!r}\n{format_traceback(exc)}"
+            )
+            return
 
-            if mtype == "group":
-                log_info(f"[Group:{group_id}] <{user_id}> {plain}")
-            elif mtype == "private":
-                log_info(f"[Private] <{user_id}> {plain}")
-            else:
-                log_info(f"[Msg:{mtype}] <{user_id}> {plain}")
+        if not inspect.isawaitable(result):
+            return
+
+        task = asyncio.create_task(result)
+        self._event_tasks.add(task)
+        task.add_done_callback(self._on_event_done)
+
+    def _on_event_done(self, task: asyncio.Task) -> None:
+        self._event_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            log_err(
+                f"事件处理异常：{exc!r}\n{format_traceback(exc)}"
+            )
+
+    def _print_event(self, event: Dict[str, Any]) -> None:
+        post_type = event.get("post_type")
+        if post_type != "message":
+            log_info(f"[Event:{post_type}] {event}")
+            return
+
+        message_type = event.get("message_type")
+        user_id = event.get("user_id")
+        group_id = event.get("group_id")
+        message = event.get("message")
+
+        if isinstance(message, list):
+            plain = message_array_to_plain(message)
         else:
-            # 其他事件类型简单打印
-            log_info(f"[Event:{pt}] {evt}")
+            plain = str(message)
 
-    # -------------------------
-    # API 调用
-    # -------------------------
-    async def call_api(self, action: str, params: Optional[Dict[str, Any]] = None, timeout: float = 20.0) -> Dict[str, Any]:
+        if message_type == "group":
+            log_info(f"[Group:{group_id}] <{user_id}> {plain}")
+        elif message_type == "private":
+            log_info(f"[Private] <{user_id}> {plain}")
+        else:
+            log_info(f"[Msg:{message_type}] <{user_id}> {plain}")
+
+    # ------------------------------------------------------------------
+    # API
+    # ------------------------------------------------------------------
+    async def call_api(
+        self,
+        action: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: float = 20.0,
+    ) -> Dict[str, Any]:
         ws = self._require_ws()
         echo = self._next_echo()
-        req = {
-            "action": action,
-            "params": params or {},
-            "echo": echo,
-        }
-        payload = json.dumps(req, ensure_ascii=False)
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending[echo] = fut
-        await ws.send(payload)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._pending[echo] = future
+
+        payload = json.dumps(
+            {"action": action, "params": params or {}, "echo": echo},
+            ensure_ascii=False,
+        )
+
         try:
-            resp = await asyncio.wait_for(fut, timeout=timeout)
-            return resp
-        except Exception:
-            # 超时或异常，清理 pending
+            await ws.send(payload)
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
             self._pending.pop(echo, None)
-            raise
+            if not future.done():
+                future.cancel()
 
-    async def send_private_message(self, user_id: int, message: Message) -> Dict[str, Any]:
-        """
-        发送私聊消息（数组格式）
-        """
-        return await self.call_api("send_private_msg", {"user_id": int(user_id), "message": message})
+    async def send_private_message(
+        self, user_id: int, message: Message
+    ) -> Dict[str, Any]:
+        return await self.call_api(
+            "send_private_msg",
+            {"user_id": int(user_id), "message": message},
+        )
 
-    async def send_group_message(self, group_id: int, message: Message) -> Dict[str, Any]:
-        """
-        发送群聊消息（数组格式）
-        """
-        return await self.call_api("send_group_msg", {"group_id": int(group_id), "message": message})
+    async def send_group_message(
+        self, group_id: int, message: Message
+    ) -> Dict[str, Any]:
+        return await self.call_api(
+            "send_group_msg",
+            {"group_id": int(group_id), "message": message},
+        )
 
-    async def send_private_forward(self, user_id: int, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        发送私聊合并转发消息
-        nodes: 由消息段 type="node" 的数组（可用 message.node_custom(...) 构建）
-        """
-        return await self.call_api("send_private_forward_msg", {"user_id": int(user_id), "messages": nodes})
+    async def send_private_forward(
+        self, user_id: int, nodes: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return await self.call_api(
+            "send_private_forward_msg",
+            {"user_id": int(user_id), "messages": nodes},
+        )
 
-    async def send_group_forward(self, group_id: int, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        发送群聊合并转发消息
-        nodes: 由消息段 type="node" 的数组（可用 message.node_custom(...) 构建）
-        """
-        return await self.call_api("send_group_forward_msg", {"group_id": int(group_id), "messages": nodes})
+    async def send_group_forward(
+        self, group_id: int, nodes: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return await self.call_api(
+            "send_group_forward_msg",
+            {"group_id": int(group_id), "messages": nodes},
+        )
 
-
-    async def upload_private_file(self, user_id: int, file_path: str, name: Optional[str] = None) -> Dict[str, Any]:
-        """
-        上传私聊文件（需 OneBot 实现支持，如 go-cqhttp）
-        参数:
-          - user_id: 私聊对象 QQ
-          - file_path: 本地路径/URL/base64://
-          - name: 展示名称（默认取文件名）
-        返回:
-          - OneBot 实现自定义的数据，若包含 message_id 则可用于合并转发节点
-        """
-        uri = _to_file_uri(file_path)
-        params: Dict[str, Any] = {"user_id": int(user_id), "file": uri, "name": name or pathlib.Path(file_path).name}
+    async def upload_private_file(
+        self,
+        user_id: int,
+        file_path: str,
+        name: Optional[str] = None,
+        *,
+        use_uri: bool = True,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "user_id": int(user_id),
+            "file": _file_value(file_path, use_uri=use_uri),
+            "name": name or pathlib.Path(file_path).name,
+        }
         return await self.call_api("upload_private_file", params)
 
-    async def upload_group_file(self, group_id: int, file_path: str, name: Optional[str] = None, folder: Optional[str] = None, timeout: float = 120.0) -> Dict[str, Any]:
-        """
-        上传群文件（需 OneBot 实现支持，如 go-cqhttp）
-        参数:
-          - group_id: 群号
-          - file_path: 本地路径/URL/base64://
-          - name: 展示名称（默认取文件名）
-          - folder: 群文件夹目录（可选）
-          - timeout: API 调用超时时间（秒），默认 120 秒以适应大文件上传
-        """
-        uri = _to_file_uri(file_path)
-        params: Dict[str, Any] = {"group_id": int(group_id), "file": uri, "name": name or pathlib.Path(file_path).name}
+    async def upload_group_file(
+        self,
+        group_id: int,
+        file_path: str,
+        name: Optional[str] = None,
+        folder: Optional[str] = None,
+        timeout: float = 120.0,
+        *,
+        use_uri: bool = True,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "group_id": int(group_id),
+            "file": _file_value(file_path, use_uri=use_uri),
+            "name": name or pathlib.Path(file_path).name,
+        }
         if folder:
             params["folder"] = folder
         return await self.call_api("upload_group_file", params, timeout=timeout)
-    # -------------------------
+
+    # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
+    async def stop(self) -> None:
+        """主动停止客户端。"""
+        self._stopping = True
+        ws = self._ws
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+        for task in list(self._event_tasks):
+            task.cancel()
+        self._event_tasks.clear()
+        self._fail_pending(ConnectionError("客户端已停止"))
+
+    # ------------------------------------------------------------------
     # 内部辅助
-    # -------------------------
-    def _require_ws(self) -> WebSocketClientProtocol:
+    # ------------------------------------------------------------------
+    def _fail_pending(self, exc: BaseException) -> None:
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(exc)
+        self._pending.clear()
+
+    def _require_ws(self) -> Any:
         if self._ws is None:
-            raise RuntimeError("WebSocket not connected")
+            raise RuntimeError("OneBot WebSocket 尚未连接")
         return self._ws
 
     def _next_echo(self) -> str:
         self._echo_seq += 1
         return f"jm-bot-{self._echo_seq}"
 
-# -------------------------
-# 简易启动器（仅用于本阶段终端验证）
-# -------------------------
-async def _demo_main() -> None:
-    """
-    运行示例：
-      python -m jm_bot.onebot_ws
-    说明：
-      - 仅建立连接并打印事件，不自动回复。
-      - 你可在 REPL 或其他逻辑中通过 OneBotWSClient 实例调用 send_* 方法发送消息。
-    """
-    cfg = load_config()
-    client = OneBotWSClient(cfg)
-    await client.run_forever()
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(_demo_main())
-    except KeyboardInterrupt:
-        log_info("Interrupted by user")
+__all__ = [
+    "OneBotWSClient",
+    "compute_backoff",
+    "is_api_success",
+    "message_array_to_plain",
+]
