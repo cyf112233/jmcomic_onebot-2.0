@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import math
 import multiprocessing
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -819,19 +821,49 @@ class JmBot:
             # 使用 spawn：避免在 asyncio + 线程环境下 fork 导致死锁，
             # 同时让 Linux/Windows/macOS 行为一致。
             context = multiprocessing.get_context("spawn")
-            self._pool = ProcessPoolExecutor(
-                max_workers=workers, mp_context=context
-            )
+            options = {
+                "max_workers": workers,
+                "mp_context": context,
+            }
+            try:
+                parameters = inspect.signature(
+                    ProcessPoolExecutor
+                ).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            if "max_tasks_per_child" in parameters:
+                # 每个任务结束就回收 worker，释放 Pillow/下载缓存占用的内存
+                options["max_tasks_per_child"] = 1
+            self._pool = ProcessPoolExecutor(**options)
         return self._pool
+
+    def _reset_pool(self) -> None:
+        """丢弃当前进程池，下一次任务会创建新的 worker。"""
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception as exc:
+                log_warn(f"关闭进程池失败：{exc!r}")
 
     async def _run_pool(self, func: Callable[..., Any], *args: Any) -> Any:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._get_pool(), func, *args)
+        for attempt in (1, 2):
+            pool = self._get_pool()
+            try:
+                return await loop.run_in_executor(pool, func, *args)
+            except BrokenProcessPool:
+                self._reset_pool()
+                if attempt == 1:
+                    log_warn(
+                        "进程池子进程异常退出，已重建进程池并重试一次。"
+                    )
+                    continue
+                raise
+        raise RuntimeError("进程池执行失败")  # pragma: no cover
 
     def close(self) -> None:
-        if self._pool is not None:
-            self._pool.shutdown(wait=False, cancel_futures=True)
-            self._pool = None
+        self._reset_pool()
 
     # ------------------------------------------------------------------
     # 更新
