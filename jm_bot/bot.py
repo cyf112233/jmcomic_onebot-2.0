@@ -58,7 +58,6 @@ from .texts import (
     UPDATE_START_TEXT,
     UPDATE_TASK_BUSY_TEXT,
     UPDATE_TIMEOUT_TEXT,
-    USAGE_TEXT,
     format_multi_chapter_rejection,
     format_success_info,
 )
@@ -380,9 +379,6 @@ class JmBot:
         elif command.name == "help":
             await self._cmd_help(group_id)
         elif command.name == "jm":
-            if not command.album_id:
-                await self._send_group(group_id, USAGE_TEXT)
-                return
             await self._request_jm(group_id, command.album_id)
 
     def _is_admin(self, user_id: Optional[int]) -> bool:

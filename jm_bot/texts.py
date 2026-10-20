@@ -13,12 +13,6 @@ GROUP_DISABLED_TEXT = "本群尚未开启 jm 功能，请机器人管理员发�
 
 NO_PERMISSION_TEXT = "无权限：该命令仅机器人管理员可用。"
 
-USAGE_TEXT = (
-    "用法：/jm <漫画ID>\n"
-    "例如：/jm 123456\n"
-    "仅支持单章节漫画。"
-)
-
 HELP_TEXT = (
     "命令列表：\n"
     "1) /jm <漫画ID> — 获取单章节漫画并发送加密压缩包\n"
@@ -27,6 +21,7 @@ HELP_TEXT = (
     "4) /关闭jm — 禁用本群（机器人管理员）\n"
     "5) /更新jm — 更新 jmcomic 并重启（机器人管理员）\n"
     "\n"
+    "⚠️ 命令必须严格匹配，不能多字或少字；/jm 与 ID 之间只能有一个空格。\n"
     "说明：为避免生成超大文件，本机器人会拒绝多章节漫画，"
     "只处理单章节本子。"
 )
@@ -159,7 +154,6 @@ __all__ = [
     "UPDATE_START_TEXT",
     "UPDATE_TASK_BUSY_TEXT",
     "UPDATE_TIMEOUT_TEXT",
-    "USAGE_TEXT",
     "format_multi_chapter_rejection",
     "format_success_info",
 ]

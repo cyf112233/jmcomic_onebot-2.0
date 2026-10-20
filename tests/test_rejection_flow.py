@@ -161,7 +161,7 @@ def test_enabled_group_rejects_multi_chapter(tmp_path):
     assert calls == []
 
 
-def test_jm_without_id_shows_usage(tmp_path):
+def test_incomplete_jm_command_is_ignored(tmp_path):
     async def scenario():
         client = FakeClient()
         calls = []
@@ -172,9 +172,27 @@ def test_jm_without_id_shows_usage(tmp_path):
         return client, calls
 
     client, calls = asyncio.run(scenario())
-    texts = [text for _, text in client.group_messages]
 
-    assert any("用法" in text for text in texts)
+    assert client.group_messages == []
+    assert client.deleted == []
+    assert calls == []
+
+
+def test_question_mark_is_not_a_command(tmp_path):
+    async def scenario():
+        client = FakeClient()
+        calls = []
+        bot = _bot(tmp_path, client, calls)
+        await bot.set_group_enabled(10001, True)
+        await bot.on_event(_event("?"))
+        await bot.on_event(_event("？"))
+        bot.close()
+        return client, calls
+
+    client, calls = asyncio.run(scenario())
+
+    assert client.group_messages == []
+    assert client.deleted == []
     assert calls == []
 
 

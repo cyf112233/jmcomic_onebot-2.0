@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
-"""聊天命令解析。
+"""聊天命令解析（严格语法）。
 
-支持的命令（前缀 ``/ . ! #`` 均可省略）::
+只接受以下**完全匹配**的命令，不能多字、不能少字、不能改大小写::
 
-    /jm <漫画ID>     拉取单章节漫画
-    /帮助 /help      查看帮助
-    /开启jm /enable  启用本群（管理员）
-    /关闭jm /disable 禁用本群（管理员）
-    /更新jm /update  更新 jmcomic 并重启（管理员）
+    /jm <漫画ID>     拉取单章节漫画（/jm 与 ID 之间恰好一个半角空格）
+    /帮助            查看帮助
+    /开启jm          启用本群（管理员）
+    /关闭jm          禁用本群（管理员）
+    /更新jm          更新 jmcomic 并重启（管理员）
 
-解析前会做 NFKC 归一化（全角转半角）并移除 CQ 码。
+以下写法都不再识别::
+
+    ?  /help  /enable  /disable  /update
+    jm 123  .jm 123  !jm 123  #jm 123
+    /jm123  /jm  123  /jm #123  /jm id:123
+    /jm 123 多余文字
+
+解析前会做 NFKC 归一化（全角转半角）并移除 CQ 码；
+只裁剪消息首尾空白，命令内部的空格必须严格匹配。
 """
 
 from __future__ import annotations
@@ -19,20 +27,16 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Optional, Pattern
 
-_PREFIX = r"^\s*[/.#!]?\s*"
-
 _CQ_RE = re.compile(r"\[CQ:[^\]]*\]")
-_JM_ID_RE = re.compile(
-    _PREFIX + r"jm\s*(?:#|id\s*[:=]?)?\s*(\d{1,10})\s*$",
-    re.IGNORECASE,
-)
-_JM_EMPTY_RE = re.compile(_PREFIX + r"jm\s*$", re.IGNORECASE)
 
-_PATTERNS: Dict[str, Pattern[str]] = {
-    "enable": re.compile(_PREFIX + r"(?:开启\s*jm|enable)\s*$", re.IGNORECASE),
-    "disable": re.compile(_PREFIX + r"(?:关闭\s*jm|disable)\s*$", re.IGNORECASE),
-    "update": re.compile(_PREFIX + r"(?:更新\s*jm|update)\s*$", re.IGNORECASE),
-    "help": re.compile(_PREFIX + r"(?:帮助|help|\?)\s*$", re.IGNORECASE),
+# /jm 与 ID 之间必须恰好一个半角空格
+_JM_RE = re.compile(r"/jm ([0-9]{1,10})")
+
+_COMMANDS: Dict[str, Pattern[str]] = {
+    "help": re.compile(r"/帮助"),
+    "enable": re.compile(r"/开启jm"),
+    "disable": re.compile(r"/关闭jm"),
+    "update": re.compile(r"/更新jm"),
 }
 
 
@@ -46,28 +50,24 @@ class Command:
 
 
 def normalize_text(text: str) -> str:
-    """全角转半角、去掉 CQ 码并裁剪首尾空白。"""
+    """全角转半角、去掉 CQ 码，并裁剪消息首尾空白。"""
     normalized = unicodedata.normalize("NFKC", str(text or ""))
     normalized = _CQ_RE.sub("", normalized)
     return normalized.strip()
 
 
 def parse_command(text: str) -> Optional[Command]:
-    """解析一条群消息文本；不是命令时返回 ``None``。"""
+    """解析一条群消息；不是严格命令时返回 ``None``。"""
     normalized = normalize_text(text)
     if not normalized:
         return None
 
-    match = _JM_ID_RE.match(normalized)
+    match = _JM_RE.fullmatch(normalized)
     if match:
         return Command("jm", match.group(1), normalized)
 
-    if _JM_EMPTY_RE.match(normalized):
-        # 缺少 ID，交给上层回复用法说明
-        return Command("jm", "", normalized)
-
-    for name, pattern in _PATTERNS.items():
-        if pattern.match(normalized):
+    for name, pattern in _COMMANDS.items():
+        if pattern.fullmatch(normalized):
             return Command(name, "", normalized)
 
     return None
