@@ -10,6 +10,13 @@ dist/
 .venv/
 venv/
 
+# Native build artifacts (Cython / Nuitka); repo stays pure Python
+*.so
+*.pyd
+*.c
+*.dist/
+*.onefile-build/
+
 # Runtime data / logs
 data/
 jm_bot/.work/

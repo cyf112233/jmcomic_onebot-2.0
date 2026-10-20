@@ -337,6 +337,8 @@ python3 -m venv .venv
 .venv/bin/ruff check jm_bot tests scripts
 ```
 
+> 仓库只包含**纯 Python 源码**。Cython/Nuitka 生成的 `.so`、`.pyd`、`.c`、`build/` 等产物已在 `.gitignore` 中忽略，不会提交到 GitHub；如需 native 构建，请在自己的部署环境本地生成。
+
 测试覆盖：
 
 - 命令解析（中英文、全角、CQ 码、非法输入）
