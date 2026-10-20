@@ -125,15 +125,20 @@ def test_multi_chapter_rejection_text():
         100,
         [("1", "1", "第一话"), ("2", "2", "第二话"), ("3", "3", "第三话")],
     )
-    text = format_multi_chapter_rejection(meta)
-    assert "多章节" in text
+    text = format_multi_chapter_rejection(meta, max_chapters=2)
+    assert "章节数超过限制" in text
     assert "422866" in text
     assert "章节数：3" in text
+    assert "上限：2 章" in text
+    assert "最多支持 2 章" in text
     assert "章节示例" in text
     assert "第一话" in text
 
-    post_check = format_multi_chapter_rejection(meta, actual_count=5)
-    assert "章节数：5" in post_check
+    post_check = format_multi_chapter_rejection(
+        meta, actual_count=12, max_chapters=10
+    )
+    assert "章节数：12" in post_check
+    assert "上限：10 章" in post_check
 
 
 def test_success_info_contains_password_and_size():

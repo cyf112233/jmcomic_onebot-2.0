@@ -15,15 +15,14 @@ NO_PERMISSION_TEXT = "无权限：该命令仅机器人管理员可用。"
 
 HELP_TEXT = (
     "命令列表：\n"
-    "1) /jm <漫画ID> — 获取单章节漫画并发送加密压缩包\n"
+    "1) /jm <漫画ID> — 获取漫画并发送加密压缩包（最多 {max_chapters} 章）\n"
     "2) /帮助 — 显示本帮助\n"
     "3) /开启jm — 启用本群（机器人管理员）\n"
     "4) /关闭jm — 禁用本群（机器人管理员）\n"
     "5) /更新jm — 更新 jmcomic 并重启（机器人管理员）\n"
     "\n"
     "⚠️ 命令必须严格匹配，不能多字或少字；/jm 与 ID 之间只能有一个空格。\n"
-    "说明：为避免生成超大文件，本机器人会拒绝多章节漫画，"
-    "只处理单章节本子。"
+    "说明：本机器人最多支持 {max_chapters} 章，超过上限会拒绝处理。"
 )
 
 META_FAILED_TEXT = (
@@ -73,23 +72,26 @@ UPDATE_NO_PIP_TEXT = (
 def format_multi_chapter_rejection(
     meta: Optional[AlbumMeta] = None,
     actual_count: Optional[int] = None,
+    max_chapters: int = 1,
 ) -> str:
-    """生成多章节拒绝文案。"""
+    """生成章节数超过上限的拒绝文案。"""
+    limit = max(1, int(max_chapters))
     count = (
         actual_count
         if actual_count is not None
         else (meta.chapter_count if meta else 0)
     )
-    lines = ["❌ 已拒绝处理：检测到多章节漫画"]
+    lines = ["❌ 已拒绝处理：章节数超过限制"]
 
     if meta is not None:
         lines.append(f"📚 标题：{truncate_text(meta.name or '未知', 80)}")
         lines.append(f"🆔 漫画 ID：{meta.album_id}")
 
     lines.append(f"📖 章节数：{count}")
+    lines.append(f"📌 上限：{limit} 章")
     lines.append("")
-    lines.append("本机器人仅支持单章节漫画，多章节本子不会下载。")
-    lines.append("请发送单章节漫画的 ID 后重试。")
+    lines.append(f"本机器人最多支持 {limit} 章，超过上限的漫画不会下载。")
+    lines.append(f"请发送章节数不超过 {limit} 章的漫画 ID。")
 
     if meta is not None:
         titles = [chapter.title for chapter in meta.chapters if chapter.title]

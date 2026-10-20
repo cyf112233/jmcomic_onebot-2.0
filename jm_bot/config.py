@@ -44,8 +44,10 @@ class BotConfig:
     per_group_cooldown_seconds: int = 0
     admins: List[int] = field(default_factory=list)
 
-    # 多章节拒绝：默认开启。检测在下载前完成，下载后还有兜底校验。
+    # 多章节策略：默认最多允许 10 章；超过限制才拒绝。
+    # 检测在下载前完成，下载后还有兜底校验。
     reject_multi_chapter: bool = True
+    max_chapters: int = 10
 
     # 群默认是否启用（未在状态文件中出现时生效）
     group_enabled_by_default: bool = False
@@ -295,6 +297,12 @@ def load_config(
         admins=_ensure_int_list(bot_raw.get("admins")),
         reject_multi_chapter=_ensure_bool(
             bot_raw.get("reject_multi_chapter"), True
+        ),
+        max_chapters=_check_range(
+            "bot.max_chapters",
+            _ensure_int(bot_raw.get("max_chapters"), 10),
+            1,
+            1000,
         ),
         group_enabled_by_default=_ensure_bool(
             bot_raw.get("group_enabled_by_default"), False

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jmcomic-onebot"
 version = "2.1.0"
-description = "JMComic downloader for OneBot v11 QQ groups (single-chapter only)"
+description = "JMComic downloader for OneBot v11 QQ groups (up to 10 chapters by default)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-only" }

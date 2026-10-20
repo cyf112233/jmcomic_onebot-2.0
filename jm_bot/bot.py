@@ -384,6 +384,10 @@ class JmBot:
     def _is_admin(self, user_id: Optional[int]) -> bool:
         return user_id is not None and user_id in self._admin_ids
 
+    def _max_chapters(self) -> int:
+        """当前允许的最大章节数（至少 1）。"""
+        return max(1, int(self.cfg.bot.max_chapters))
+
     async def _cmd_enable(
         self, group_id: int, user_id: Optional[int]
     ) -> None:
@@ -415,7 +419,10 @@ class JmBot:
         if not self.is_group_enabled(group_id):
             await self._send_group(group_id, GROUP_DISABLED_TEXT)
             return
-        await self._send_group(group_id, HELP_TEXT)
+        await self._send_group(
+            group_id,
+            HELP_TEXT.format(max_chapters=self._max_chapters()),
+        )
 
     async def _cmd_update(
         self, group_id: int, user_id: Optional[int]
@@ -467,8 +474,9 @@ class JmBot:
     # 核心流水线
     # ------------------------------------------------------------------
     async def handle_jm_command(self, group_id: int, album_id: str) -> None:
-        """下载并发送一本漫画；多章节会在下载前直接拒绝。"""
+        """下载并发送一本漫画；章节数超过上限会在下载前直接拒绝。"""
         album_id = str(album_id)
+        max_chapters = self._max_chapters()
         check_message_id = await self._send_group_with_id(
             group_id, f"正在检查 jm {album_id} ……"
         )
@@ -495,14 +503,17 @@ class JmBot:
             )
         elif (
             self.cfg.bot.reject_multi_chapter
-            and meta.is_multi_chapter
+            and meta.chapter_count > max_chapters
         ):
             log_info(
-                f"拒绝多章节漫画：album={album_id} title={meta.name!r} "
-                f"chapters={meta.chapter_count}"
+                f"拒绝章节数超限：album={album_id} title={meta.name!r} "
+                f"chapters={meta.chapter_count} max={max_chapters}"
             )
             await self._send_group(
-                group_id, format_multi_chapter_rejection(meta)
+                group_id,
+                format_multi_chapter_rejection(
+                    meta, max_chapters=max_chapters
+                ),
             )
             return
 
@@ -586,19 +597,22 @@ class JmBot:
                     "未找到任何图片，下载可能失败，请稍后重试。"
                 )
 
-            # 下载后兜底：即使预检漏掉，也绝不发送多章节本
+            # 下载后兜底：即使预检漏掉，也绝不发送超限本
+            max_chapters = self._max_chapters()
             if (
                 self.cfg.bot.reject_multi_chapter
-                and len(chapter_dirs) > 1
+                and len(chapter_dirs) > max_chapters
             ):
                 log_warn(
-                    f"下载后发现 {len(chapter_dirs)} 个章节，执行兜底拒绝："
-                    f"album={album_id}"
+                    f"下载后发现 {len(chapter_dirs)} 个章节，超过上限 "
+                    f"{max_chapters}，执行兜底拒绝：album={album_id}"
                 )
                 await self._send_group(
                     group_id,
                     format_multi_chapter_rejection(
-                        meta, actual_count=len(chapter_dirs)
+                        meta,
+                        actual_count=len(chapter_dirs),
+                        max_chapters=max_chapters,
                     ),
                 )
                 return

@@ -39,6 +39,7 @@ def test_defaults(tmp_path):
     cfg = load_config(str(config), project_root=project)
 
     assert cfg.bot.reject_multi_chapter is True
+    assert cfg.bot.max_chapters == 10
     assert cfg.bot.work_dir == project / "data" / "work"
     assert cfg.bot.state_file == project / "data" / "group_state.json"
     assert cfg.bot.jmcomic_config == (
@@ -53,6 +54,7 @@ def test_overrides_and_type_coercion(tmp_path):
         tmp_path,
         bot_extra=(
             "  reject_multi_chapter: false\n"
+            "  max_chapters: 5\n"
             "  admins: ['123', 456, 123]\n"
             "  per_group_cooldown_enabled: 'yes'\n"
             "  per_group_cooldown_seconds: 30\n"
@@ -66,6 +68,7 @@ def test_overrides_and_type_coercion(tmp_path):
     cfg = load_config(str(config), project_root=project)
 
     assert cfg.bot.reject_multi_chapter is False
+    assert cfg.bot.max_chapters == 5
     assert cfg.bot.admins == [123, 456]
     assert cfg.bot.per_group_cooldown_enabled is True
     assert cfg.bot.per_group_cooldown_seconds == 30
@@ -117,6 +120,8 @@ def test_state_file_inside_work_dir(tmp_path):
     [
         "  pdf_resolution: 1000\n",
         "  download_workers: 0\n",
+        "  max_chapters: 0\n",
+        "  max_chapters: 1001\n",
         "  zip_password_length: 2\n",
         "  log_level: 'LOUD'\n",
         "  per_group_cooldown_seconds: -1\n",

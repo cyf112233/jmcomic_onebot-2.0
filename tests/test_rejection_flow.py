@@ -13,9 +13,8 @@ MULTI_META = AlbumMeta.from_episodes(
     "多章节测试漫画",
     120,
     [
-        ("100001", "1", "第一话"),
-        ("100002", "2", "第二话"),
-        ("100003", "3", "第三话"),
+        (str(100001 + index), str(index + 1), f"第{index + 1}话")
+        for index in range(12)
     ],
 )
 
@@ -115,11 +114,14 @@ def test_multi_chapter_is_rejected_before_download(tmp_path):
 
     assert texts, "至少应发送检查消息"
     assert any("正在检查" in text for text in texts)
-    assert any("多章节" in text for text in texts)
-    assert any("章节数：3" in text for text in texts)
+    assert any("多章节" in text or "超过限制" in text for text in texts)
+    assert any(
+        f"章节数：{MULTI_META.chapter_count}" in text for text in texts
+    )
+    assert any("上限：10 章" in text for text in texts)
     assert not any("正在下载" in text for text in texts)
     assert client.deleted == []
-    assert calls == [], "多章节不应进入下载阶段"
+    assert calls == [], "超过上限不应进入下载阶段"
     assert client.uploads == []
     assert client.private_messages == []
 
@@ -155,7 +157,7 @@ def test_enabled_group_rejects_multi_chapter(tmp_path):
     texts = [text for _, text in client.group_messages]
 
     assert any("正在检查" in text for text in texts)
-    assert any("多章节" in text for text in texts)
+    assert any("超过限制" in text for text in texts)
     assert not any("正在下载" in text for text in texts)
     assert client.deleted == []
     assert calls == []
