@@ -71,6 +71,37 @@ def _to_pdf_mode(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
+_JPEG_SUFFIXES = frozenset({".jpg", ".jpeg"})
+
+
+def _can_use_img2pdf(files: Sequence[Path], max_width: int) -> bool:
+    """JPEG 且不需要缩放时，用 img2pdf 直接嵌入，避免整本解码。"""
+    return (
+        max_width <= 0
+        and bool(files)
+        and all(path.suffix.lower() in _JPEG_SUFFIXES for path in files)
+    )
+
+
+def _build_with_img2pdf(
+    files: Sequence[Path],
+    output: Path,
+    title: Optional[str],
+    resolution: float,
+) -> None:
+    """流式写入 PDF，内存占用远低于 Pillow 逐张解码。"""
+    import img2pdf
+
+    with output.open("wb") as stream:
+        options = {
+            "outputstream": stream,
+            "dpi": float(resolution),
+        }
+        if title:
+            options["title"] = str(title)
+        img2pdf.convert(*[str(path) for path in files], **options)
+
+
 def build_pdf(
     chapter_dirs: Union[str, Path, Sequence[Union[str, Path]]],
     output_path: Union[str, Path],
@@ -86,8 +117,21 @@ def build_pdf(
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-
     started = time.monotonic()
+
+    if _can_use_img2pdf(files, max_width):
+        try:
+            _build_with_img2pdf(files, output, title, resolution)
+        except Exception as exc:
+            log_warn(f"img2pdf 快速合成失败，回退 Pillow：{exc}")
+        else:
+            elapsed = time.monotonic() - started
+            log_info(
+                f"PDF 生成完成（img2pdf）：{output.name}（"
+                f"{len(files)} 页，{elapsed:.1f} 秒）"
+            )
+            return output
+
     images: List[Image.Image] = []
     resources: List[Image.Image] = []
 
